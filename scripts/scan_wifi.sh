@@ -1,43 +1,53 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if command -v nmcli &>/dev/null; then
-    nmcli -t -f SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null | while IFS=: read -r ssid signal enc; do
-        [ -z "$ssid" ] && continue
-        printf "%-30s  %-5s  %s\n" "$ssid" "$signal" "$enc"
-    done | sort -k2 -rn
-    exit 0
-fi
-
 INTERFACE="${1:-wlan0}"
 
-if ! command -v iwlist &>/dev/null; then
-    echo "error: neither nmcli nor iwlist found (install wireless-tools or NetworkManager)" >&2
-    exit 1
-fi
-
-if ! ip link show "$INTERFACE" &>/dev/null; then
-    echo "error: interface $INTERFACE not found" >&2
-    exit 1
-fi
-
-echo "[*] Scanning on $INTERFACE ..." >&2
-sudo iwlist "$INTERFACE" scan 2>/dev/null | awk '
-/ESSID/ {
-    gsub(/.*ESSID:"|"/, "")
-    ssid = $0
+scan_nmcli() {
+    nmcli -t -f SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null | \
+    while IFS=: read -r ssid signal enc; do
+        [ -z "$ssid" ] && continue
+        printf "%-30s  %5s  %s\n" "$ssid" "$signal" "$enc"
+    done | sort -k2 -rn
 }
-/Encryption/ {
-    gsub(/.*Encryption:/, "")
-    enc = $0
-}
-/Quality/ {
-    gsub(/  Quality/, "")
-    gsub(/  Signal level/, "")
-    qual = $1
-    if (ssid != "" && ssid !~ /^$/) {
-        printf "%-30s  %-15s  %s\n", ssid, qual, enc
+
+scan_iwlist() {
+    sudo iwlist "$INTERFACE" scan 2>/dev/null | awk '
+    /ESSID:/ {
+        sub(/.*ESSID:"/, ""); sub(/".*/, ""); ssid = $0
     }
-    ssid = ""
+    /Encryption/ {
+        enc = index($0, "on") ? "WPA/WPA2" : "Open"
+    }
+    /Quality/ {
+        qual = ""
+        if (match($0, /Quality[=:][[:space:]]*([0-9]+)/, a)) qual = a[1]
+        if (ssid != "" && qual != "") {
+            printf "%-30s  %5s  %s\n", ssid, qual, enc
+            ssid = ""; qual = ""; enc = ""
+        }
+    }'
 }
-' | sort -t/ -k2 -rn 2>/dev/null || echo "[-] No networks found or scan failed."
+
+main() {
+    if command -v nmcli &>/dev/null; then
+        scan_nmcli
+        exit 0
+    fi
+
+    if ! command -v iwlist &>/dev/null; then
+        echo "error: neither nmcli nor iwlist found" >&2
+        echo "Install wireless-tools or NetworkManager" >&2
+        exit 1
+    fi
+
+    if ! ip link show "$INTERFACE" &>/dev/null; then
+        echo "error: interface $INTERFACE not found" >&2
+        exit 1
+    fi
+
+    echo "[*] Scanning on $INTERFACE ..." >&2
+    scan_iwlist
+}
+
+main

