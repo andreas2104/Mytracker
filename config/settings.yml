@@ -1,0 +1,6 @@
+ssid: ""
+charset: "abcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+|}>?"
+min_length: 8
+max_length: 8
+timeout: 5
+interface: wlan0
